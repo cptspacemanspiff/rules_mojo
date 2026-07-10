@@ -96,7 +96,7 @@ def _format_include(arg):
 def _format_path(arg):
     return [arg.path]
 
-def _mojo_binary_test_implementation(ctx, *, shared_library = False):
+def _mojo_binary_test_implementation(ctx, *, shared_library = False, static_library = False):
     cc_toolchain = find_cpp_toolchain(ctx)
     mojo_toolchain = ctx.exec_groups["mojo_compile"].toolchains["//:toolchain_type"].mojo_toolchain_info
     build_env = getattr(ctx.exec_groups["mojo_compile"].toolchains["//:toolchain_type"], "build_env", {})
@@ -191,6 +191,35 @@ def _mojo_binary_test_implementation(ctx, *, shared_library = False):
             ]),
         )]),
     )
+
+    # Static library: archive the compiled object into lib<name>.a with the same
+    # one-call API cc_library uses. disallow_dynamic_library means there is no link
+    # step, so the Modular runtime .so's (the toolchain's implicit_deps) are never
+    # pulled in -- a runtime-light kernel archive depends on nothing but libc, and
+    # any runtime dependency defers to whoever links the final binary.
+    if static_library:
+        # create_compilation_outputs validates object extensions and rejects
+        # mojo's `.lo`; expose the same object under a `.o` name via a symlink.
+        object_o = ctx.actions.declare_file(ctx.label.name + ".o")
+        ctx.actions.symlink(output = object_o, target_file = object_file)
+        compilation_outputs = cc_common.create_compilation_outputs(
+            objects = depset([object_o]),
+        )
+        static_linking_context, static_linking_outputs = cc_common.create_linking_context_from_compilation_outputs(
+            actions = ctx.actions,
+            name = ctx.label.name,
+            compilation_outputs = compilation_outputs,
+            cc_toolchain = cc_toolchain,
+            feature_configuration = feature_configuration,
+            disallow_dynamic_library = True,
+        )
+        library = static_linking_outputs.library_to_link
+        archive = library.static_library or library.pic_static_library
+        return [
+            DefaultInfo(files = depset([archive])),
+            CcInfo(linking_context = static_linking_context),
+            OutputGroupInfo(mojo_object = depset([object_file]), **output_group_kwargs),
+        ]
 
     link_kwargs = {}
     if shared_library:
@@ -334,6 +363,14 @@ mojo_shared_library = rule(
             doc = "The name of the shared library to be created.",
         ),
     },
+    exec_groups = _EXEC_GROUPS,
+    toolchains = _TOOLCHAINS,
+    fragments = ["cpp"],
+)
+
+mojo_static_library = rule(
+    implementation = lambda ctx: _mojo_binary_test_implementation(ctx, static_library = True),
+    attrs = _ATTRS,
     exec_groups = _EXEC_GROUPS,
     toolchains = _TOOLCHAINS,
     fragments = ["cpp"],
