@@ -1,0 +1,4 @@
+# The default pixi binary lockfile (see pixi.bzl). Exported so the `pixi` module
+# extension's `lockfile` attr can default to it, and so downstream modules can
+# reference it if they want to base an override on it.
+exports_files(["pixi.lock.json"])

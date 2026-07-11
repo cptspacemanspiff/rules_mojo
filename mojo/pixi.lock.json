@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/theoremlp/rules_multitool/main/lockfile.schema.json",
+  "pixi": {
+    "binaries": [
+      {
+        "kind": "archive",
+        "url": "https://github.com/prefix-dev/pixi/releases/download/v0.72.2/pixi-x86_64-unknown-linux-musl.tar.gz",
+        "file": "pixi",
+        "sha256": "1411219982281ad6d224337c6a82acfe3548bc13d82e55903ff8c8c05b22a038",
+        "os": "linux",
+        "cpu": "x86_64"
+      },
+      {
+        "kind": "archive",
+        "url": "https://github.com/prefix-dev/pixi/releases/download/v0.72.2/pixi-aarch64-unknown-linux-musl.tar.gz",
+        "file": "pixi",
+        "sha256": "ecdc83450002025691f805e250bf2199e878e042ca5fc44cb11f119e48cc836e",
+        "os": "linux",
+        "cpu": "arm64"
+      },
+      {
+        "kind": "archive",
+        "url": "https://github.com/prefix-dev/pixi/releases/download/v0.72.2/pixi-aarch64-apple-darwin.tar.gz",
+        "file": "pixi",
+        "sha256": "6e973893aa61368d83b1bccaeb04b6b5e231f3169110aa421605be8762409a0d",
+        "os": "macos",
+        "cpu": "arm64"
+      },
+      {
+        "kind": "archive",
+        "url": "https://github.com/prefix-dev/pixi/releases/download/v0.72.2/pixi-x86_64-apple-darwin.tar.gz",
+        "file": "pixi",
+        "sha256": "656d3acca3e3166d4ea487d404176c51c62219556fe858fba461ea32e6d21abb",
+        "os": "macos",
+        "cpu": "x86_64"
+      }
+    ]
+  }
+}
