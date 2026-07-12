@@ -27,12 +27,13 @@ def conda_stem(url):
         fail("expected a .conda URL, got: " + url)
     return name[:-len(".conda")]
 
-def fetch_conda(rctx, urls, sha256, into):
-    """Download a .conda and extract its payload under `into/` (tool-free).
+def fetch_conda(rctx, urls, sha256, into, member = "pkg"):
+    """Download a .conda and extract one of its inner tarballs under `into/`.
 
     A .conda is a zip wrapping zstd tarballs; extract the outer zip then the
-    inner `pkg-<stem>.tar.zst`, leaving `into/lib/mojo/*` in place. Shared by the
-    single-package `mojo_conda_repository` and the multi-package hub.
+    inner `<member>-<stem>.tar.zst`. `member="pkg"` yields `into/lib/mojo/*`
+    (the payload); `member="info"` yields `into/info/recipe/recipe.yaml` etc.
+    (the rattler-build metadata). Tool-free (Bazel's native zip/zstd).
     """
     stem = conda_stem(urls[0])
     archive = "{}/{}.conda".format(into, stem) if into else stem + ".conda"
@@ -41,7 +42,8 @@ def fetch_conda(rctx, urls, sha256, into):
     # inner tarball in one download_and_extract).
     rctx.download(url = urls, output = archive, sha256 = sha256)
     rctx.extract(archive, output = into, type = "zip")
-    rctx.extract("{}/pkg-{}.tar.zst".format(into, stem) if into else "pkg-" + stem + ".tar.zst", output = into)
+    inner = "{}-{}.tar.zst".format(member, stem)
+    rctx.extract("{}/{}".format(into, inner) if into else inner, output = into)
 
 def _mojo_conda_repository_impl(rctx):
     fetch_conda(rctx, rctx.attr.urls, rctx.attr.sha256, into = "")
