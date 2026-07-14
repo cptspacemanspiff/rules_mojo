@@ -202,8 +202,18 @@ def _mojo_binary_test_implementation(ctx, *, shared_library = False, static_libr
         # mojo's `.lo`; expose the same object under a `.o` name via a symlink.
         object_o = ctx.actions.declare_file(ctx.label.name + ".o")
         ctx.actions.symlink(output = object_o, target_file = object_file)
+
+        # The SAME object fills both the PIC and non-PIC slot: mojo emits
+        # position-independent code (the shared/binary path above hands this very
+        # object to create_library_to_link as `pic_static_library`, and
+        # mojo_shared_library links it into a .so), and it is equally valid in a
+        # non-PIC static link. Declaring only one slot means a consumer built for
+        # the other one silently sees NO objects -- e.g. under --force_pic an
+        # objects-only library drops out of cc_static_library's bundle entirely,
+        # yielding an archive with the kernels missing rather than an error.
         compilation_outputs = cc_common.create_compilation_outputs(
             objects = depset([object_o]),
+            pic_objects = depset([object_o]),
         )
         static_linking_context, static_linking_outputs = cc_common.create_linking_context_from_compilation_outputs(
             actions = ctx.actions,
