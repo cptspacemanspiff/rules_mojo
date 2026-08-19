@@ -333,4 +333,13 @@ mojo_shared_library = rule(
     exec_groups = _EXEC_GROUPS,
     toolchains = _TOOLCHAINS,
     fragments = ["cpp"],
+
+    # Advertise CcInfo. Not cosmetic: rules_cc reaches its deps through
+    # graph_structure_aspect, which is declared `required_providers = [[CcInfo],
+    # [CcSharedLibraryHintInfo], [ProtoInfo]]`. An aspect with required_providers
+    # is only applied to a dep whose RULE advertises them -- returning CcInfo at
+    # analysis time is too late. Without this, cc_shared_library fails with
+    # "doesn't contain declared provider 'GraphNodeInfo'" rather than the real
+    # diagnostic.
+    provides = [CcInfo],
 )
