@@ -1,0 +1,137 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//mojo:mojo_library.bzl", "mojo_library")
+load("//mojo:mojo_static_library.bzl", "mojo_static_library")
+
+# Call Mojo from C
+
+mojo_static_library(
+    name = "lib",
+    srcs = ["lib.mojo"],
+)
+
+cc_test(
+    name = "static_library_test",
+    srcs = ["main.cc"],
+    deps = [":lib"],
+)
+
+# The archive is also consumable as a deliverable. Packaging it into a shared
+# library is what makes both of the rule's defaults load-bearing: the object has
+# to fill the PIC slot, and it has to be alwayslink, or the link selects no
+# archive member at all and silently produces an empty .so.
+#
+# Linux-only because it names the output .so; the property under test is not
+# platform specific.
+
+cc_binary(
+    name = "libpackaged.so",
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [":lib"],
+)
+
+cc_import(
+    name = "packaged",
+    shared_library = ":libpackaged.so",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+cc_test(
+    name = "packaged_test",
+    srcs = ["main.cc"],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [":packaged"],
+)
+
+# Call C from Mojo, with the cc dep declared on the mojo_static_library
+
+cc_library(
+    name = "helper",
+    srcs = ["helper.c"],
+)
+
+mojo_static_library(
+    name = "deps_lib",
+    srcs = ["deps_lib.mojo"],
+    deps = [":helper"],
+)
+
+cc_test(
+    name = "deps_test",
+    srcs = ["deps_main.cc"],
+    deps = [":deps_lib"],
+)
+
+# ... and with it declared on an intermediate mojo_library instead, so it reaches
+# the consumer only through MojoInfo
+
+mojo_library(
+    name = "mojo_lib",
+    srcs = ["mojo_lib/__init__.mojo"],
+    deps = [":helper"],
+)
+
+mojo_static_library(
+    name = "via_mojo_lib",
+    srcs = ["via_mojo_lib.mojo"],
+    deps = [":mojo_lib"],
+)
+
+cc_test(
+    name = "via_mojo_lib_test",
+    srcs = ["via_mojo_lib_main.cc"],
+    deps = [":via_mojo_lib"],
+)
+
+# propagate_deps = False drops every dep from the archive's CcInfo, including the
+# Mojo runtime, for an archive an outside build links itself.
+
+mojo_static_library(
+    name = "runtime_light",
+    srcs = ["lib.mojo"],
+    propagate_deps = False,
+)
+
+build_test(
+    name = "runtime_light_build_test",
+    targets = [":runtime_light"],
+)
+
+# Packaged again, but through a cc_library into cc_shared_library. This is the
+# path that fails SILENTLY when the rule does not advertise CcInfo: rules_cc
+# reaches its deps through graph_structure_aspect, which is declared
+# `required_providers = [[CcInfo], ...]`, and an aspect with required_providers
+# only applies to a dep whose RULE advertises them -- returning CcInfo at
+# analysis time is too late. Without the advertisement the aspect is skipped, no
+# GraphNodeInfo is attached, and this builds clean and emits a .so with none of
+# the Mojo symbols in it.
+
+cc_library(
+    name = "lib_wrapper",
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [":lib"],
+)
+
+cc_shared_library(
+    name = "wrapped_shared",
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [":lib_wrapper"],
+)
+
+cc_import(
+    name = "wrapped",
+    shared_library = ":wrapped_shared",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+cc_test(
+    name = "cc_shared_library_test",
+    srcs = ["main.cc"],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [":wrapped"],
+)

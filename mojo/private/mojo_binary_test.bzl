@@ -93,7 +93,7 @@ def _find_main(name, srcs, main):
 def _format_include(arg):
     return ["-I", arg.dirname]
 
-def _mojo_binary_test_implementation(ctx, *, shared_library = False):
+def _mojo_binary_test_implementation(ctx, *, shared_library = False, static_library = False):
     cc_toolchain = find_cpp_toolchain(ctx)
     mojo_toolchain = ctx.exec_groups["mojo_compile"].toolchains["//:toolchain_type"].mojo_toolchain_info
     build_env = getattr(ctx.exec_groups["mojo_compile"].toolchains["//:toolchain_type"], "build_env", {})
@@ -188,6 +188,89 @@ def _mojo_binary_test_implementation(ctx, *, shared_library = False):
             ]),
         )]),
     )
+
+    # Static library: archive the compiled object into lib<name>.a with the same
+    # one-call API cc_library uses.
+    #
+    # Unlike the binary/shared paths below, there is no link step here
+    # (disallow_dynamic_library), so this rule absorbs nothing. Its deps therefore
+    # have to be PROPAGATED instead: they ride along in the returned CcInfo and are
+    # linked by whoever eventually links this archive. That is what cc_library does,
+    # and it is what makes
+    #
+    #     mojo_static_library -> cc_library -> cc_shared_library
+    #
+    # produce the same .so -- same DT_NEEDED, same defined symbols -- as passing the
+    # same srcs and deps to mojo_shared_library. Going through the static rule must
+    # not change what you get.
+    if static_library:
+        # create_compilation_outputs validates object extensions and rejects
+        # mojo's `.lo`; expose the same object under a `.o` name via a symlink.
+        object_o = ctx.actions.declare_file(ctx.label.name + ".o")
+        ctx.actions.symlink(output = object_o, target_file = object_file)
+
+        # The SAME object fills both the PIC and non-PIC slot: mojo emits
+        # position-independent code (the shared/binary path above hands this very
+        # object to create_library_to_link as `pic_static_library`, and
+        # mojo_shared_library links it into a .so), and it is equally valid in a
+        # non-PIC static link. Declaring only one slot means a consumer built for
+        # the other one silently sees NO objects -- e.g. under --force_pic an
+        # objects-only library drops out of cc_static_library's bundle entirely,
+        # yielding an archive with the kernels missing rather than an error.
+        compilation_outputs = cc_common.create_compilation_outputs(
+            objects = depset([object_o]),
+            pic_objects = depset([object_o]),
+        )
+
+        # Every dep's linking context, so the consumer's link sees them: the
+        # cc_library deps written on this target, the ones propagated through a
+        # mojo_library dep, AND the toolchain's implicit_deps (the Modular runtime
+        # .so's). That is exactly `ccdeps`, the merged CcInfo collect_mojoinfo
+        # already built for the link below -- taking it from there rather than
+        # re-walking all_deps is what keeps the static path seeing the same set the
+        # shared path links. Propagating costs nothing here: it records edges for
+        # the eventual linker rather than linking anything now.
+        #
+        # propagate_deps = False drops all of them, for an archive meant to be
+        # runtime-light: one that depends on nothing but libc and defers every
+        # runtime dependency to whoever links the final binary. That only works if
+        # the Mojo in it avoids print, strings, raising, and owned-heap containers;
+        # otherwise the object keeps its undefined KGEN_CompilerRT_* references and
+        # the consumer's link fails (or, into a .so, links clean and fails at load).
+        linking_contexts = []
+        if ctx.attr.propagate_deps:
+            linking_contexts = [ccdeps.linking_context]
+
+        static_linking_context, static_linking_outputs = cc_common.create_linking_context_from_compilation_outputs(
+            actions = ctx.actions,
+            name = ctx.label.name,
+            compilation_outputs = compilation_outputs,
+            cc_toolchain = cc_toolchain,
+            feature_configuration = feature_configuration,
+            linking_contexts = linking_contexts,
+            alwayslink = ctx.attr.alwayslink,
+            disallow_dynamic_library = True,
+        )
+        library = static_linking_outputs.library_to_link
+        archive = library.static_library or library.pic_static_library
+
+        # There is no link step here to absorb anything, so runfiles are
+        # forwarded rather than staged: `data` on this target, plus whatever the
+        # cc deps need at runtime (a shared library a cc_import carries, say),
+        # so they reach whoever ends up linking the archive.
+        transitive_runfiles = [target[DefaultInfo].default_runfiles for target in ctx.attr.data]
+        for target in ctx.attr.deps:
+            if CcInfo in target:
+                transitive_runfiles.append(target[DefaultInfo].default_runfiles)
+
+        return [
+            DefaultInfo(
+                files = depset([archive]),
+                runfiles = ctx.runfiles(ctx.files.data).merge_all(transitive_runfiles),
+            ),
+            CcInfo(linking_context = static_linking_context),
+            OutputGroupInfo(mojo_object = depset([object_file]), **output_group_kwargs),
+        ]
 
     link_kwargs = {}
     if shared_library:
@@ -341,5 +424,65 @@ mojo_shared_library = rule(
     # analysis time is too late. Without this, cc_shared_library fails with
     # "doesn't contain declared provider 'GraphNodeInfo'" rather than the real
     # diagnostic.
+    provides = [CcInfo],
+)
+
+mojo_static_library = rule(
+    implementation = lambda ctx: _mojo_binary_test_implementation(ctx, static_library = True),
+    attrs = _ATTRS | {
+        "alwayslink": attr.bool(
+            default = True,
+            doc = """\
+Whether the compiled object is linked into a consumer even when nothing references
+it, i.e. -Wl,--whole-archive semantics for this archive. Mirrors cc_library's
+attribute of the same name, but defaults to True rather than False.
+
+The default is True because a Mojo library's reason to exist is its @export'd
+symbols, and NOTHING INSIDE the archive references them -- the caller is across the
+C ABI. The binary/shared paths already mark this same object alwayslink for that
+reason. With False, packaging the archive into a .so drops the object entirely and
+yields a library that links clean and exports nothing, so a consumer would have to
+know to write -Wl,--whole-archive by hand.
+
+Setting False is reasonable for an archive linked into a C/C++ binary that calls it
+directly: there the caller's undefined reference pulls the object in anyway, and
+False lets a consumer that uses nothing from it pay nothing.
+
+Note this does NOT control per-kernel granularity. `mojo build` emits ONE object per
+target, with a monolithic .text and no per-function sections, so referencing any one
+@export pulls in every other kernel in the same target regardless of this attribute
+(and --gc-sections cannot split it). Split targets, not this flag, if that matters.
+""",
+        ),
+        "propagate_deps": attr.bool(
+            default = True,
+            doc = """\
+Whether this archive's deps ride along in its CcInfo, to be linked by whoever
+links the archive.
+
+True (the default) makes the archive behave like any other cc_library: both the
+deps written on this target and the toolchain's Mojo runtime reach the consumer's
+link, so packaging this into a .so yields the same DT_NEEDED and the same symbols
+as building the same sources with mojo_shared_library.
+
+False drops them, for a runtime-light archive that depends on nothing but libc --
+a shippable .a an outside build can link against without the Modular runtime .so's
+in tow. This only holds if the Mojo in it avoids print, strings, raising, and
+owned-heap containers; otherwise its undefined KGEN_CompilerRT_* references become
+the consumer's problem, and into a .so that failure is silent until load time.
+""",
+        ),
+    },
+    exec_groups = _EXEC_GROUPS,
+    toolchains = _TOOLCHAINS,
+    fragments = ["cpp"],
+    # Advertise CcInfo. Not cosmetic: cc_shared_library reaches its deps through
+    # graph_structure_aspect, which is declared `required_providers = [[CcInfo],
+    # [CcSharedLibraryHintInfo], [ProtoInfo]]`. An aspect with required_providers is
+    # only applied to a dep whose RULE advertises them -- returning CcInfo at
+    # analysis time is too late. Without this the aspect is skipped, no GraphNodeInfo
+    # is attached, and cc_shared_library either fails outright ("doesn't contain
+    # declared provider 'GraphNodeInfo'") or, with a cc_library in between, silently
+    # links NOTHING and emits an empty .so.
     provides = [CcInfo],
 )
